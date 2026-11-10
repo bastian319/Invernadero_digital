@@ -1,9 +1,7 @@
 package com.example.invernadero_digital
 
-import android.content.Context
 import android.os.Build
 import android.os.Bundle
-import android.util.Base64
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
@@ -40,6 +38,9 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.invernadero_digital.datos.BaseDatosInvernadero
+import com.example.invernadero_digital.datos.Usuario
+import kotlinx.coroutines.launch
 import java.security.MessageDigest
 import java.security.SecureRandom
 import javax.crypto.SecretKeyFactory
@@ -70,10 +71,12 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun AplicacionInvernadero() {
     var mostrarRegistro by remember { mutableStateOf(false) }
-    val context = LocalContext.current
-
     var haIniciadoSesion by remember { mutableStateOf(false) }
     var mensajeLogin by remember { mutableStateOf("") }
+    val context = LocalContext.current
+    val baseDatos = remember { BaseDatosInvernadero.obtener(context) }
+    val usuarioDao = remember { baseDatos.usuarioDao() }
+    val scope = rememberCoroutineScope()
 
     when {
         haIniciadoSesion -> {
@@ -88,11 +91,27 @@ fun AplicacionInvernadero() {
         mostrarRegistro -> {
             PantallaRegistro(
                 alVolver = { mostrarRegistro = false },
-                alRegistrarse = { correo, contrasena ->
-                    guardarRegistro(context, correo, contrasena)
-
-                    mostrarRegistro = false
-                    mensajeLogin = "Cuenta creada. Inicia sesión."
+                alRegistrarse = { nombre, correo, contrasena ->
+                    scope.launch {
+                        val correoNormalizado = correo.trim().lowercase()
+                        val existente = usuarioDao.buscarPorCorreo(correoNormalizado)
+                        if (existente != null) {
+                            mostrarRegistro = false
+                            mensajeLogin = "Ese correo ya tiene una cuenta. Inicia sesión."
+                        } else {
+                            val (salt, hash) = crearCredencial(contrasena)
+                            usuarioDao.insertar(
+                                Usuario(
+                                    nombre = nombre.trim(),
+                                    correo = correoNormalizado,
+                                    saltContrasena = salt,
+                                    hashContrasena = hash
+                                )
+                            )
+                            mostrarRegistro = false
+                            mensajeLogin = "Cuenta creada. Inicia sesión."
+                        }
+                    }
                 }
             )
         }
@@ -105,18 +124,27 @@ fun AplicacionInvernadero() {
                     mensajeLogin = ""
                 },
                 alIniciarSesion = { correo, contrasena ->
-                    if (validarRegistro(context, correo, contrasena)) {
-                        haIniciadoSesion = true
-                        mensajeLogin = ""
-                    } else {
-                        mensajeLogin = "Correo o contraseña incorrectos."
+                    scope.launch {
+                        val usuario = usuarioDao.buscarPorCorreo(correo.trim().lowercase())
+                        if (
+                            usuario != null &&
+                            verificarContrasena(
+                                contrasena,
+                                usuario.saltContrasena,
+                                usuario.hashContrasena
+                            )
+                        ) {
+                            haIniciadoSesion = true
+                            mensajeLogin = ""
+                        } else {
+                            mensajeLogin = "Correo o contraseña incorrectos."
+                        }
                     }
                 }
             )
         }
     }
 }
-
 @Composable
 fun PantallaInicioSesion(
     mensaje: String,
@@ -202,7 +230,7 @@ fun PantallaInicioSesion(
 @Composable
 fun PantallaRegistro(
     alVolver: () -> Unit,
-    alRegistrarse: (String, String) -> Unit
+    alRegistrarse: (String, String, String) -> Unit
 ) {
     var nombre by remember { mutableStateOf("") }
     var correo by remember { mutableStateOf("") }
@@ -278,7 +306,7 @@ fun PantallaRegistro(
                         mensaje =
                             "Completa los campos. La contraseña debe tener 6 caracteres o más."
                     } else {
-                        alRegistrarse(correo.trim(), contrasena)
+                        alRegistrarse(nombre.trim(), correo.trim().lowercase(), contrasena)
                     }
                 },
                 modifier = Modifier
@@ -403,7 +431,7 @@ fun PantallaPanel(alCerrarSesion: () -> Unit) {
                 )
 
                 TarjetaMedicion(
-                    titulo = "Humedad del aire",
+                    titulo = "Precipitaciones",
                     valor = "72 %",
                     estado = "ESTABLE",
                     icono = "☁",
@@ -420,8 +448,8 @@ fun PantallaPanel(alCerrarSesion: () -> Unit) {
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 TarjetaMedicion(
-                    titulo = "Temperatura",
-                    valor = "24 °C",
+                    titulo = "Iluminación solar",
+                    valor = "71",
                     estado = "MODERADA",
                     icono = "☀",
                     colorEstado = Color(0xFFFFC857),
@@ -645,30 +673,17 @@ fun PantallaConsola(alVolver: () -> Unit) {
         }
     }
 }
-private const val PREFERENCIAS_USUARIO = "cuenta_invernadero"
-
-private fun guardarRegistro(context: Context, correo: String, contrasena: String) {
+private fun crearCredencial(contrasena: String): Pair<ByteArray, ByteArray> {
     val salt = ByteArray(16)
     SecureRandom().nextBytes(salt)
-    val hash = derivarHash(contrasena, salt)
-    context.getSharedPreferences(PREFERENCIAS_USUARIO, Context.MODE_PRIVATE)
-        .edit()
-        .putString("correo", correo.trim().lowercase())
-        .putString("salt", Base64.encodeToString(salt, Base64.NO_WRAP))
-        .putString("hash", Base64.encodeToString(hash, Base64.NO_WRAP))
-        .apply()
+    return salt to derivarHash(contrasena, salt)
 }
 
-private fun validarRegistro(context: Context, correo: String, contrasena: String): Boolean {
-    val preferencias = context.getSharedPreferences(PREFERENCIAS_USUARIO, Context.MODE_PRIVATE)
-    val correoGuardado = preferencias.getString("correo", null) ?: return false
-    val saltGuardado = preferencias.getString("salt", null) ?: return false
-    val hashGuardado = preferencias.getString("hash", null) ?: return false
-    if (correo.trim().lowercase() != correoGuardado) return false
-    val salt = Base64.decode(saltGuardado, Base64.NO_WRAP)
-    val hash = Base64.decode(hashGuardado, Base64.NO_WRAP)
-    return MessageDigest.isEqual(hash, derivarHash(contrasena, salt))
-}
+private fun verificarContrasena(
+    contrasena: String,
+    salt: ByteArray,
+    hashGuardado: ByteArray
+): Boolean = MessageDigest.isEqual(hashGuardado, derivarHash(contrasena, salt))
 
 private fun derivarHash(contrasena: String, salt: ByteArray): ByteArray {
     val algoritmo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
